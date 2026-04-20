@@ -8,6 +8,13 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  --bg: #f3f3ef;
+  --text: #111111;
+  --muted: #5c5c5c;
+  --line: #d6d6cf;
+  --panel: rgba(255, 255, 255, 0.72);
+  --danger: #b42318;
 }
 
 * {
@@ -19,13 +26,12 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100%;
-  background: #f3f3ef;
-  color: #111111;
+  background: var(--bg);
+  color: var(--text);
 }
 
 body,
-#app,
-.app {
+#app {
   min-height: 100vh;
 }
 
@@ -39,7 +45,13 @@ button {
   cursor: pointer;
 }
 
-.app {
+textarea {
+  resize: vertical;
+}
+
+.app-shell {
+  min-height: 100vh;
+  width: 100%;
   display: flex;
   justify-content: center;
 }
@@ -50,46 +62,48 @@ button {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 20px 18px 24px;
-  background: #f3f3ef;
+  padding: 16px 14px 20px;
+  background: var(--bg);
 }
 
 .topbar {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 36px;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 24px;
 }
 
 .project-tag {
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #5c5c5c;
+  color: var(--muted);
+  text-align: right;
 }
 
 .lang-switch,
 .ghost-button,
 .small-button {
-  border: 1px solid #d6d6cf;
-  background: #ffffff;
-  color: #111111;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text);
   border-radius: 999px;
-  padding: 8px 14px;
+  padding: 10px 14px;
+  min-height: 42px;
 }
 
 .content {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
 h1 {
   margin: 0;
-  font-size: 2rem;
-  line-height: 1.05;
-  letter-spacing: -0.03em;
+  font-size: clamp(1.8rem, 6vw, 2.3rem);
+  line-height: 1.02;
+  letter-spacing: -0.04em;
 }
 
 h2 {
@@ -103,47 +117,43 @@ p {
   line-height: 1.55;
 }
 
-.box,
-.result-box {
-  margin-top: 18px;
-  border: 1px solid #d6d6cf;
+.panel {
+  margin-top: 10px;
+  border: 1px solid var(--line);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.6);
-  padding: 18px;
+  background: var(--panel);
+  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.result-label {
-  font-size: 0.8rem;
-  letter-spacing: 0.12em;
+.eyebrow {
+  font-size: 0.78rem;
   text-transform: uppercase;
-  color: #5c5c5c;
+  letter-spacing: 0.14em;
+  color: var(--muted);
 }
 
 .result-value {
-  font-size: 1.4rem;
+  font-size: 1.35rem;
   font-weight: 600;
   line-height: 1.1;
-}
-
-.result-text {
-  font-size: 0.95rem;
-  color: #444444;
 }
 
 .checkbox-row {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  margin-top: 4px;
   font-size: 0.95rem;
   line-height: 1.5;
 }
 
 .checkbox-row input {
-  margin-top: 4px;
+  margin-top: 5px;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
 }
 
 .field {
@@ -159,16 +169,12 @@ p {
 .field input,
 .field textarea {
   width: 100%;
-  border: 1px solid #d6d6cf;
+  border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 14px 16px;
-  background: #ffffff;
-  color: #111111;
-}
-
-.field textarea {
-  resize: vertical;
-  min-height: 96px;
+  padding: 14px 14px;
+  background: #fff;
+  color: var(--text);
+  min-height: 48px;
 }
 
 .status-row {
@@ -176,92 +182,123 @@ p {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  padding: 6px 0;
 }
 
 .status-pill {
-  border: 1px solid #111111;
-  background: #111111;
-  color: #f3f3ef;
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--bg);
   border-radius: 999px;
   padding: 6px 10px;
   font-size: 0.8rem;
   white-space: nowrap;
 }
 
-.status-pill.inactive {
-  border-color: #d6d6cf;
-  background: #ffffff;
-  color: #5c5c5c;
+.status-pill.muted {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--muted);
+}
+
+.metrics-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
 
 .metric-card {
-  border: 1px solid #d6d6cf;
+  border: 1px solid var(--line);
   border-radius: 16px;
-  background: #ffffff;
-  padding: 14px 16px;
+  background: #fff;
+  padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-height: 96px;
+}
+
+.metric-card.full-width {
+  grid-column: 1 / -1;
 }
 
 .metric-label {
-  font-size: 0.85rem;
-  color: #5c5c5c;
+  font-size: 0.78rem;
+  color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 
 .metric-value {
-  font-size: 1.4rem;
+  font-size: 1.35rem;
   line-height: 1.1;
   font-weight: 600;
 }
 
-.footer-actions {
-  margin-top: auto;
-  padding-top: 28px;
+.map-placeholder {
+  min-height: 180px;
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  text-align: center;
+  padding: 18px;
 }
 
-.two-actions {
+.footer-actions {
+  margin-top: auto;
+  padding-top: 20px;
+}
+
+.stacked-actions {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .primary-button,
 .secondary-button {
   width: 100%;
   border-radius: 18px;
-  padding: 16px 20px;
+  padding: 15px 18px;
+  min-height: 52px;
   font-size: 1rem;
 }
 
 .primary-button {
-  border: 1px solid #111111;
-  background: #111111;
-  color: #f3f3ef;
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--bg);
 }
 
 .secondary-button {
-  border: 1px solid #d6d6cf;
-  background: #ffffff;
-  color: #111111;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text);
+}
+
+.secondary-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .danger-button {
-  border-color: #b42318;
-  color: #b42318;
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 @media (min-width: 768px) {
-  .app {
-    padding: 24px;
+  .app-shell {
+    padding: 20px;
   }
 
   .screen {
-    min-height: calc(100vh - 48px);
-    border-left: 1px solid #d6d6cf;
-    border-right: 1px solid #d6d6cf;
+    min-height: calc(100vh - 40px);
+    border-left: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+    padding: 20px 18px 24px;
   }
 }
