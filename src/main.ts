@@ -1,4 +1,7 @@
 import './style.css'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import { toJpeg } from 'html-to-image'
 
 type Page = 'intro' | 'setup' | 'calibration' | 'performance' | 'results' | 'close'
 
@@ -23,6 +26,10 @@ type GpsPoint = {
   acc: number
   absoluteTimeMs: number
   relativeTimeMs: RelativeTimeMs
+}
+
+type ShareNavigator = Navigator & {
+  canShare?: (data?: { files?: File[] }) => boolean
 }
 
 type AppState = {
@@ -102,6 +109,11 @@ let smoothedSignal = 0
 let gravityBaseline = 9.81
 let theoreticalStepIndex = 0
 
+let resultsMap: L.Map | null = null
+let resultsPolyline: L.Polyline | null = null
+let resultsStartMarker: L.CircleMarker | null = null
+let resultsEndMarker: L.CircleMarker | null = null
+
 const theoreticalStepsStore: TheoreticalStep[] = []
 const gpsTrack: GpsPoint[] = []
 
@@ -117,6 +129,10 @@ function escapeHtml(value: string) {
 function csvEscape(value: string | number | boolean | null | undefined) {
   const text = String(value ?? '')
   return `"${text.replaceAll('"', '""')}"`
+}
+
+function safeIsoFilenamePart() {
+  return new Date().toISOString().replaceAll(':', '-')
 }
 
 function mapSensitivity(value: number) {
@@ -196,9 +212,20 @@ function stopGpsWatch() {
   }
 }
 
+function destroyResultsMap() {
+  if (resultsMap) {
+    resultsMap.remove()
+    resultsMap = null
+  }
+  resultsPolyline = null
+  resultsStartMarker = null
+  resultsEndMarker = null
+}
+
 function resetAllState() {
   clearSessionTimers()
   stopGpsWatch()
+  destroyResultsMap()
 
   state.page = 'intro'
   state.consentAccepted = false
@@ -679,70 +706,76 @@ function buildCsvRows() {
   return rows
 }
 
-function downloadSessionData() {
-  const rows = buildCsvRows()
-  const csv = rows.map((row) => row.map((cell) => csvEscape(cell)).join(',')).join('\n')
+function buildCsvString() {
+  return buildCsvRows()
+    .map((row) => row.map((cell) => csvEscape(cell)).join(','))
+    .join('\n')
+}
 
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
+function buildCsvFile() {
+  const csv = buildCsvString()
+  return new File([csv], `embodied-xx0-beta-session-${safeIsoFilenamePart()}.csv`, {
+    type: 'text/csv;charset=utf-8;',
+  })
+}
+
+function buildGpxString() {
+  const trackPoints = gpsTrack
+    .map((point) => {
+      const isoTime = new Date(point.absoluteTimeMs).toISOString()
+      return `
+      <trkpt lat="${point.lat}" lon="${point.lng}">
+        <time>${isoTime}</time>
+        <hdop>${point.acc}</hdop>
+      </trkpt>`
+    })
+    .join('')
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="${PROJECT_TITLE}" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>${PROJECT_TITLE}</name>
+    <time>${new Date().toISOString()}</time>
+  </metadata>
+  <trk>
+    <name>${PROJECT_TITLE} Session Track</name>
+    <trkseg>${trackPoints}
+    </trkseg>
+  </trk>
+</gpx>`
+}
+
+function buildGpxFile() {
+  const gpx = buildGpxString()
+  return new File([gpx], `embodied-xx0-beta-track-${safeIsoFilenamePart()}.gpx`, {
+    type: 'application/gpx+xml',
+  })
+}
+
+function downloadFile(file: File) {
+  const url = URL.createObjectURL(file)
   const anchor = document.createElement('a')
-  const safeDate = new Date().toISOString().replaceAll(':', '-')
   anchor.href = url
-  anchor.download = `embodied-xx0-beta-session-${safeDate}.csv`
+  anchor.download = file.name
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
   URL.revokeObjectURL(url)
 }
 
-function sendSessionData() {
-  const rows = buildCsvRows()
-  const csv = rows.map((row) => row.map((cell) => csvEscape(cell)).join(',')).join('\n')
-
-  const subject = encodeURIComponent(`${PROJECT_TITLE} — Session Data CSV`)
-  const body = encodeURIComponent(csv)
-  const mailto = `mailto:${RECIPIENT_EMAIL}?subject=${subject}&body=${body}`
-
-  window.location.href = mailto
-}
-
-function deleteSessionData() {
-  const confirmed = window.confirm('Delete all current session data?')
-  if (!confirmed) return
-
-  state.page = 'intro'
-  state.consentAccepted = false
-  state.stepLengthCm = ''
-  state.footLengthCm = ''
-  state.alternativeMovementParameters = ''
-  state.calculatedIntervalSec = null
-  state.calculatedIntervalMs = null
-  state.calibrationRunning = false
-  state.sessionRunning = false
-  state.gpsEnabled = false
-  state.gpsDenied = false
-  state.motionEnabled = false
-
-  clearSessionTimers()
-  stopGpsWatch()
-  resetCalibrationData()
-  resetSessionData()
-
-  renderApp()
-}
-
-function renderSimpleTrackMap() {
-  if (gpsTrack.length < 2) {
-    return `
-      <div class="trace-summary">
-        <p>${gpsTrack.length === 1 ? 'Only one GPS point collected.' : 'No GPS trace collected yet.'}</p>
-      </div>
-    `
+function buildFallbackRouteSvg() {
+  if (gpsTrack.length === 0) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800">
+      <rect width="100%" height="100%" fill="#ffffff"/>
+      <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="32" fill="#555">
+        No GPS trace available
+      </text>
+    </svg>`
   }
 
-  const width = 320
-  const height = 220
-  const padding = 18
+  const width = 1200
+  const height = 800
+  const padding = 80
 
   const lats = gpsTrack.map((p) => p.lat)
   const lngs = gpsTrack.map((p) => p.lng)
@@ -765,31 +798,220 @@ function renderSimpleTrackMap() {
   const start = points[0]
   const end = points[points.length - 1]
 
-  const firstGps = gpsTrack[0]
-  const lastGps = gpsTrack[gpsTrack.length - 1]
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+    <rect width="100%" height="100%" fill="#ffffff"/>
+    <polyline points="${polyline}" fill="none" stroke="#1f1b16" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="${start.x}" cy="${start.y}" r="16" fill="#2b7a3d"/>
+    <circle cx="${end.x}" cy="${end.y}" r="16" fill="#8f2d2d"/>
+    <text x="60" y="70" font-family="Arial, sans-serif" font-size="28" fill="#1f1b16">${PROJECT_TITLE}</text>
+  </svg>`
+}
 
-  return `
-    <div class="trace-map-wrapper">
-      <svg
-        class="trace-map"
-        viewBox="0 0 ${width} ${height}"
-        role="img"
-        aria-label="Spatial trace of GPS path"
-      >
-        <rect x="0" y="0" width="${width}" height="${height}" rx="16" ry="16"></rect>
-        <polyline points="${polyline}"></polyline>
-        <circle class="trace-start" cx="${start.x}" cy="${start.y}" r="5"></circle>
-        <circle class="trace-end" cx="${end.x}" cy="${end.y}" r="5"></circle>
-      </svg>
+async function svgToJpegFile(svg: string, filename: string) {
+  const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
+  const svgUrl = URL.createObjectURL(svgBlob)
 
-      <div class="trace-summary">
-        <p><strong>Start:</strong> ${formatCoordinate(firstGps.lat)}, ${formatCoordinate(firstGps.lng)}</p>
-        <p><strong>End:</strong> ${formatCoordinate(lastGps.lat)}, ${formatCoordinate(lastGps.lng)}</p>
-        <p><strong>Points:</strong> ${gpsTrack.length}</p>
-        <p><strong>Distance:</strong> ${state.distanceMeters.toFixed(2)} m</p>
-      </div>
-    </div>
-  `
+  try {
+    const image = new Image()
+    image.decoding = 'async'
+
+    const loaded = new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve()
+      image.onerror = () => reject(new Error('Unable to render SVG image.'))
+    })
+
+    image.src = svgUrl
+    await loaded
+
+    const canvas = document.createElement('canvas')
+    canvas.width = image.width || 1200
+    canvas.height = image.height || 800
+
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('Canvas context not available.')
+
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    context.drawImage(image, 0, 0)
+
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((result) => resolve(result), 'image/jpeg', 0.92)
+    })
+
+    if (!blob) throw new Error('Unable to create JPEG blob.')
+    return new File([blob], filename, { type: 'image/jpeg' })
+  } finally {
+    URL.revokeObjectURL(svgUrl)
+  }
+}
+
+async function buildMapJpegFile() {
+  const filename = `embodied-xx0-beta-map-${safeIsoFilenamePart()}.jpg`
+  const mapElement = document.querySelector<HTMLElement>('#results-map')
+
+  if (mapElement) {
+    try {
+      await new Promise((resolve) => window.setTimeout(resolve, 900))
+      const dataUrl = await toJpeg(mapElement, {
+        cacheBust: true,
+        pixelRatio: 2,
+        backgroundColor: '#ffffff',
+      })
+      const response = await fetch(dataUrl)
+      const blob = await response.blob()
+      return new File([blob], filename, { type: 'image/jpeg' })
+    } catch (error) {
+      console.warn('Live map JPEG export failed, using fallback route image.', error)
+    }
+  }
+
+  return svgToJpegFile(buildFallbackRouteSvg(), filename)
+}
+
+async function downloadAllSessionFiles() {
+  const csvFile = buildCsvFile()
+  downloadFile(csvFile)
+
+  if (gpsTrack.length > 0) {
+    const gpxFile = buildGpxFile()
+    downloadFile(gpxFile)
+  }
+
+  const jpegFile = await buildMapJpegFile()
+  downloadFile(jpegFile)
+}
+
+async function sendSessionData() {
+  const files: File[] = [buildCsvFile()]
+
+  if (gpsTrack.length > 0) {
+    files.push(buildGpxFile())
+  }
+
+  files.push(await buildMapJpegFile())
+
+  const shareNavigator = navigator as ShareNavigator
+
+  if (shareNavigator.share && shareNavigator.canShare?.({ files })) {
+    try {
+      await shareNavigator.share({
+        title: PROJECT_TITLE,
+        text: 'Session files',
+        files,
+      })
+      return
+    } catch (error) {
+      console.error(error)
+    }
+  }
+
+  alert('This browser cannot send file attachments directly. The files will now be downloaded instead.')
+  await downloadAllSessionFiles()
+}
+
+function deleteSessionData() {
+  const confirmed = window.confirm('Delete all current session data?')
+  if (!confirmed) return
+
+  state.page = 'intro'
+  state.consentAccepted = false
+  state.stepLengthCm = ''
+  state.footLengthCm = ''
+  state.alternativeMovementParameters = ''
+  state.calculatedIntervalSec = null
+  state.calculatedIntervalMs = null
+  state.calibrationRunning = false
+  state.sessionRunning = false
+  state.gpsEnabled = false
+  state.gpsDenied = false
+  state.motionEnabled = false
+
+  clearSessionTimers()
+  stopGpsWatch()
+  destroyResultsMap()
+  resetCalibrationData()
+  resetSessionData()
+
+  renderApp()
+}
+
+function initOrUpdateResultsMap() {
+  const mapContainer = document.querySelector<HTMLDivElement>('#results-map')
+  if (!mapContainer) return
+
+  if (!resultsMap) {
+    resultsMap = L.map(mapContainer, {
+      zoomControl: true,
+      attributionControl: true,
+    })
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      crossOrigin: true,
+      maxZoom: 19,
+    }).addTo(resultsMap)
+  }
+
+  if (resultsPolyline) {
+    resultsPolyline.remove()
+    resultsPolyline = null
+  }
+  if (resultsStartMarker) {
+    resultsStartMarker.remove()
+    resultsStartMarker = null
+  }
+  if (resultsEndMarker) {
+    resultsEndMarker.remove()
+    resultsEndMarker = null
+  }
+
+  if (gpsTrack.length === 0) {
+    resultsMap.setView([0, 0], 2)
+    resultsMap.invalidateSize()
+    return
+  }
+
+  const latLngs = gpsTrack.map((point) => L.latLng(point.lat, point.lng))
+
+  if (latLngs.length === 1) {
+    resultsStartMarker = L.circleMarker(latLngs[0], {
+      radius: 8,
+      color: '#2b7a3d',
+      fillColor: '#2b7a3d',
+      fillOpacity: 1,
+      weight: 2,
+    }).addTo(resultsMap)
+
+    resultsMap.setView(latLngs[0], 17)
+    resultsMap.invalidateSize()
+    return
+  }
+
+  resultsPolyline = L.polyline(latLngs, {
+    color: '#1f1b16',
+    weight: 4,
+    opacity: 0.9,
+  }).addTo(resultsMap)
+
+  resultsStartMarker = L.circleMarker(latLngs[0], {
+    radius: 7,
+    color: '#2b7a3d',
+    fillColor: '#2b7a3d',
+    fillOpacity: 1,
+    weight: 2,
+  }).addTo(resultsMap)
+
+  resultsEndMarker = L.circleMarker(latLngs[latLngs.length - 1], {
+    radius: 7,
+    color: '#8f2d2d',
+    fillColor: '#8f2d2d',
+    fillOpacity: 1,
+    weight: 2,
+  }).addTo(resultsMap)
+
+  const bounds = L.latLngBounds(latLngs)
+  resultsMap.fitBounds(bounds.pad(0.15))
+  resultsMap.invalidateSize()
 }
 
 function renderIntroPage() {
@@ -1022,6 +1244,9 @@ function renderPerformancePage() {
 }
 
 function renderResultsPage() {
+  const firstGps = gpsTrack[0]
+  const lastGps = gpsTrack[gpsTrack.length - 1]
+
   return `
     <section class="screen">
       <header class="topbar">
@@ -1063,13 +1288,19 @@ function renderResultsPage() {
 
         <section class="panel">
           <div class="eyebrow">Spatial trace</div>
-          <div class="map-placeholder">
-            ${renderSimpleTrackMap()}
+          <div id="results-map" class="leaflet-map"></div>
+          <div class="map-meta">
+            <p><strong>Track points:</strong> ${gpsTrack.length}</p>
+            <p><strong>Start:</strong> ${firstGps ? `${formatCoordinate(firstGps.lat)}, ${formatCoordinate(firstGps.lng)}` : 'n/a'}</p>
+            <p><strong>End:</strong> ${lastGps ? `${formatCoordinate(lastGps.lat)}, ${formatCoordinate(lastGps.lng)}` : 'n/a'}</p>
+            <p><strong>GPX export:</strong> compatible with GPS tracking software.</p>
           </div>
         </section>
       </div>
 
-      <footer class="footer-actions">
+      <footer class="footer-actions stacked-actions">
+        <button id="download-map-jpeg-button" class="secondary-button" type="button">Download map JPEG</button>
+        <button id="download-gpx-button" class="secondary-button" type="button" ${gpsTrack.length === 0 ? 'disabled' : ''}>Download GPX</button>
         <button id="to-close-button" class="primary-button" type="button">Continue</button>
       </footer>
     </section>
@@ -1097,6 +1328,7 @@ function renderClosePage() {
         <section class="panel">
           <div class="eyebrow">Recipient</div>
           <p>${RECIPIENT_EMAIL}</p>
+          <p>Send data tries to share real files: CSV, GPX and map JPEG.</p>
         </section>
       </div>
 
@@ -1128,6 +1360,10 @@ function renderApp() {
   const app = document.querySelector<HTMLDivElement>('#app')
   if (!app) return
 
+  if (state.page !== 'results') {
+    destroyResultsMap()
+  }
+
   app.innerHTML = `
     <main class="app-shell">
       ${getMarkup()}
@@ -1135,6 +1371,12 @@ function renderApp() {
   `
 
   bindEvents()
+
+  if (state.page === 'results') {
+    window.requestAnimationFrame(() => {
+      initOrUpdateResultsMap()
+    })
+  }
 }
 
 function bindEvents() {
@@ -1239,6 +1481,16 @@ function bindEvents() {
     renderApp()
   })
 
+  document.querySelector<HTMLButtonElement>('#download-map-jpeg-button')?.addEventListener('click', async () => {
+    const jpegFile = await buildMapJpegFile()
+    downloadFile(jpegFile)
+  })
+
+  document.querySelector<HTMLButtonElement>('#download-gpx-button')?.addEventListener('click', () => {
+    if (gpsTrack.length === 0) return
+    downloadFile(buildGpxFile())
+  })
+
   document.querySelector<HTMLButtonElement>('#to-close-button')?.addEventListener('click', () => {
     state.page = 'close'
     renderApp()
@@ -1249,12 +1501,12 @@ function bindEvents() {
     renderApp()
   })
 
-  document.querySelector<HTMLButtonElement>('#send-data-button')?.addEventListener('click', () => {
-    sendSessionData()
+  document.querySelector<HTMLButtonElement>('#send-data-button')?.addEventListener('click', async () => {
+    await sendSessionData()
   })
 
-  document.querySelector<HTMLButtonElement>('#download-data-button')?.addEventListener('click', () => {
-    downloadSessionData()
+  document.querySelector<HTMLButtonElement>('#download-data-button')?.addEventListener('click', async () => {
+    await downloadAllSessionFiles()
   })
 
   document.querySelector<HTMLButtonElement>('#delete-data-button')?.addEventListener('click', () => {

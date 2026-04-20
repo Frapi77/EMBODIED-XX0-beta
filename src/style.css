@@ -415,3 +415,35 @@ button:disabled {
 .trace-map .trace-end {
   fill: #8f2d2d;
 }
+.leaflet-map {
+  width: 100%;
+  min-height: 320px;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #f8f2e8;
+}
+
+.map-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.map-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+@media (min-width: 720px) {
+  .map-actions {
+    flex-direction: row;
+  }
+
+  .map-actions > * {
+    flex: 1;
+  }
+}
