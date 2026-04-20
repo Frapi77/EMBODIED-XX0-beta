@@ -292,6 +292,34 @@ function findBestUnmatchedTheoreticalStep(now: number) {
   return best
 }
 
+function updatePerformanceMetricsOnly() {
+  const elapsed = document.querySelector<HTMLElement>('[data-metric="elapsed-time"]')
+  if (elapsed) elapsed.textContent = state.elapsedTime
+
+  const theoretical = document.querySelector<HTMLElement>('[data-metric="theoretical-steps"]')
+  if (theoretical) theoretical.textContent = String(state.theoreticalSteps)
+
+  const detected = document.querySelector<HTMLElement>('[data-metric="detected-steps"]')
+  if (detected) detected.textContent = String(state.detectedSteps)
+
+  const misalignment = document.querySelector<HTMLElement>('[data-metric="current-misalignment"]')
+  if (misalignment) misalignment.textContent = `${Math.round(state.currentMisalignmentMs)} ms`
+
+  const drift = document.querySelector<HTMLElement>('[data-metric="cumulative-drift"]')
+  if (drift) drift.textContent = `${Math.round(state.cumulativeDriftMs)} ms`
+
+  const distance = document.querySelector<HTMLElement>('[data-metric="distance"]')
+  if (distance) distance.textContent = `${state.distanceMeters.toFixed(2)} m`
+}
+
+function refreshPerformanceOrRender() {
+  if (state.page === 'performance' && state.sessionRunning) {
+    updatePerformanceMetricsOnly()
+  } else {
+    renderApp()
+  }
+}
+
 function registerDetectedStep(now: number) {
   state.detectedSteps += 1
 
@@ -303,7 +331,7 @@ function registerDetectedStep(now: number) {
     state.cumulativeDriftMs += misalignment
   }
 
-  renderApp()
+  refreshPerformanceOrRender()
 }
 
 function handleMotionEvent(event: DeviceMotionEvent) {
@@ -396,14 +424,14 @@ function addGpsPoint(position: GeolocationPosition) {
   latestGps = point
 
   if (!shouldUseGpsPoint(point)) {
-    renderApp()
+    refreshPerformanceOrRender()
     return
   }
 
   if (gpsTrack.length === 0) {
     gpsTrack.push(point)
     state.gpsPoints = gpsTrack.length
-    renderApp()
+    refreshPerformanceOrRender()
     return
   }
 
@@ -424,7 +452,7 @@ function addGpsPoint(position: GeolocationPosition) {
     state.gpsPoints = gpsTrack.length
   }
 
-  renderApp()
+  refreshPerformanceOrRender()
 }
 
 function enableGps() {
@@ -510,7 +538,7 @@ function pushTheoreticalStep(tsAbsolute: number) {
     matched: false,
   })
 
-  renderApp()
+  refreshPerformanceOrRender()
 }
 
 function scheduleNextTheoreticalStep() {
@@ -565,7 +593,7 @@ async function startSession() {
 
   liveTimer = window.setInterval(() => {
     state.elapsedTime = formatElapsed(getElapsedTimeMs())
-    renderApp()
+    refreshPerformanceOrRender()
   }, 100)
 
   startGpsWatch()
@@ -653,9 +681,7 @@ function buildCsvRows() {
 
 function downloadSessionData() {
   const rows = buildCsvRows()
-  const csv = rows
-    .map((row) => row.map((cell) => csvEscape(cell)).join(','))
-    .join('\n')
+  const csv = rows.map((row) => row.map((cell) => csvEscape(cell)).join(',')).join('\n')
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
@@ -671,9 +697,7 @@ function downloadSessionData() {
 
 function sendSessionData() {
   const rows = buildCsvRows()
-  const csv = rows
-    .map((row) => row.map((cell) => csvEscape(cell)).join(','))
-    .join('\n')
+  const csv = rows.map((row) => row.map((cell) => csvEscape(cell)).join(',')).join('\n')
 
   const subject = encodeURIComponent(`${PROJECT_TITLE} — Session Data CSV`)
   const body = encodeURIComponent(csv)
@@ -959,32 +983,32 @@ function renderPerformancePage() {
         <section class="metrics-grid">
           <div class="metric-card">
             <span class="metric-label">Elapsed time</span>
-            <span class="metric-value">${state.elapsedTime}</span>
+            <span class="metric-value" data-metric="elapsed-time">${state.elapsedTime}</span>
           </div>
 
           <div class="metric-card">
             <span class="metric-label">Theoretical steps</span>
-            <span class="metric-value">${state.theoreticalSteps}</span>
+            <span class="metric-value" data-metric="theoretical-steps">${state.theoreticalSteps}</span>
           </div>
 
           <div class="metric-card">
             <span class="metric-label">Detected steps</span>
-            <span class="metric-value">${state.detectedSteps}</span>
+            <span class="metric-value" data-metric="detected-steps">${state.detectedSteps}</span>
           </div>
 
           <div class="metric-card">
             <span class="metric-label">Current misalignment</span>
-            <span class="metric-value">${Math.round(state.currentMisalignmentMs)} ms</span>
+            <span class="metric-value" data-metric="current-misalignment">${Math.round(state.currentMisalignmentMs)} ms</span>
           </div>
 
           <div class="metric-card">
             <span class="metric-label">Cumulative drift</span>
-            <span class="metric-value">${Math.round(state.cumulativeDriftMs)} ms</span>
+            <span class="metric-value" data-metric="cumulative-drift">${Math.round(state.cumulativeDriftMs)} ms</span>
           </div>
 
           <div class="metric-card full-width">
             <span class="metric-label">Distance</span>
-            <span class="metric-value">${state.distanceMeters.toFixed(2)} m</span>
+            <span class="metric-value" data-metric="distance">${state.distanceMeters.toFixed(2)} m</span>
           </div>
         </section>
       </div>
