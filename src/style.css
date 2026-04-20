@@ -376,3 +376,42 @@ button:disabled {
     gap: 12px;
   }
 }
+.trace-map-wrapper {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.trace-map {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.trace-map rect {
+  fill: #f8f2e8;
+  stroke: #d7cfc4;
+  stroke-width: 1;
+}
+
+.trace-map polyline {
+  fill: none;
+  stroke: #1f1b16;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.trace-map circle {
+  stroke: #fff;
+  stroke-width: 2;
+}
+
+.trace-map .trace-start {
+  fill: #2b7a3d;
+}
+
+.trace-map .trace-end {
+  fill: #8f2d2d;
+}

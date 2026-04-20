@@ -2,7 +2,7 @@ import './style.css'
 
 type Page = 'intro' | 'setup' | 'calibration' | 'performance' | 'results' | 'close'
 
-const PROJECT_TITLE = 'EMBODIED X00 DPI'
+const PROJECT_TITLE = 'EMBODIED XX0 beta'
 const RECIPIENT_EMAIL = 'mail.francescopi@gmail.com'
 
 const SCANNER_SPEED_M_PER_HOUR = 883
@@ -23,34 +23,6 @@ type GpsPoint = {
   acc: number
   absoluteTimeMs: number
   relativeTimeMs: RelativeTimeMs
-}
-
-type SessionExport = {
-  project: string
-  exportedAtIso: string
-  consentAccepted: boolean
-  setup: {
-    stepLengthCm: string
-    footLengthCm: string
-    alternativeMovementParameters: string
-    calculatedIntervalSec: number | null
-    calculatedIntervalMs: number | null
-    sensitivity: number
-    peakThreshold: number
-    refractoryMs: number
-  }
-  results: {
-    elapsedTime: string
-    theoreticalSteps: number
-    detectedSteps: number
-    cumulativeDriftMs: number
-    currentMisalignmentMs: number
-    distanceMeters: number
-    gpsPoints: number
-  }
-  theoreticalStepsStore: TheoreticalStep[]
-  gpsTrack: GpsPoint[]
-  latestGps: GpsPoint | null
 }
 
 type AppState = {
@@ -140,6 +112,11 @@ function escapeHtml(value: string) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;')
+}
+
+function csvEscape(value: string | number | boolean | null | undefined) {
+  const text = String(value ?? '')
+  return `"${text.replaceAll('"', '""')}"`
 }
 
 function mapSensitivity(value: number) {
@@ -292,7 +269,6 @@ function getMotionValue(event: DeviceMotionEvent) {
     const magnitude = Math.sqrt(x * x + y * y + z * z)
 
     gravityBaseline = 0.03 * magnitude + (1 - 0.03) * gravityBaseline
-
     return Math.abs(magnitude - gravityBaseline)
   }
 
@@ -306,7 +282,6 @@ function findBestUnmatchedTheoreticalStep(now: number) {
 
   for (const step of theoreticalStepsStore) {
     if (step.matched) continue
-
     const distance = Math.abs(now - step.absoluteTimeMs)
     if (distance < bestDistance) {
       best = step
@@ -617,45 +592,77 @@ function confirmLeaveDuringSession() {
   return false
 }
 
-function buildSessionExport(): SessionExport {
-  return {
-    project: PROJECT_TITLE,
-    exportedAtIso: new Date().toISOString(),
-    consentAccepted: state.consentAccepted,
-    setup: {
-      stepLengthCm: state.stepLengthCm,
-      footLengthCm: state.footLengthCm,
-      alternativeMovementParameters: state.alternativeMovementParameters,
-      calculatedIntervalSec: state.calculatedIntervalSec,
-      calculatedIntervalMs: state.calculatedIntervalMs,
-      sensitivity: state.sensitivity,
-      peakThreshold: state.peakThreshold,
-      refractoryMs: state.refractoryMs,
-    },
-    results: {
-      elapsedTime: state.elapsedTime,
-      theoreticalSteps: state.theoreticalSteps,
-      detectedSteps: state.detectedSteps,
-      cumulativeDriftMs: state.cumulativeDriftMs,
-      currentMisalignmentMs: state.currentMisalignmentMs,
-      distanceMeters: state.distanceMeters,
-      gpsPoints: state.gpsPoints,
-    },
-    theoreticalStepsStore: [...theoreticalStepsStore],
-    gpsTrack: [...gpsTrack],
-    latestGps,
-  }
+function formatCoordinate(value: number) {
+  return value.toFixed(6)
+}
+
+function buildCsvRows() {
+  const rows: string[][] = []
+
+  rows.push(['section', 'field', 'value'])
+
+  rows.push(['summary', 'project', PROJECT_TITLE])
+  rows.push(['summary', 'exportedAtIso', new Date().toISOString()])
+  rows.push(['summary', 'consentAccepted', String(state.consentAccepted)])
+  rows.push(['summary', 'stepLengthCm', state.stepLengthCm])
+  rows.push(['summary', 'footLengthCm', state.footLengthCm])
+  rows.push(['summary', 'alternativeMovementParameters', state.alternativeMovementParameters])
+  rows.push(['summary', 'calculatedIntervalSec', state.calculatedIntervalSec ?? ''])
+  rows.push(['summary', 'calculatedIntervalMs', state.calculatedIntervalMs ?? ''])
+  rows.push(['summary', 'sensitivity', state.sensitivity])
+  rows.push(['summary', 'peakThreshold', state.peakThreshold])
+  rows.push(['summary', 'refractoryMs', state.refractoryMs])
+  rows.push(['summary', 'elapsedTime', state.elapsedTime])
+  rows.push(['summary', 'theoreticalSteps', state.theoreticalSteps])
+  rows.push(['summary', 'detectedSteps', state.detectedSteps])
+  rows.push(['summary', 'cumulativeDriftMs', state.cumulativeDriftMs])
+  rows.push(['summary', 'currentMisalignmentMs', state.currentMisalignmentMs])
+  rows.push(['summary', 'distanceMeters', state.distanceMeters])
+  rows.push(['summary', 'gpsPoints', state.gpsPoints])
+
+  rows.push([])
+  rows.push(['gpsTrack', 'index', 'lat', 'lng', 'accuracyMeters', 'absoluteTimeMs', 'relativeTimeMs'])
+
+  gpsTrack.forEach((point, index) => {
+    rows.push([
+      'gpsTrack',
+      String(index + 1),
+      String(point.lat),
+      String(point.lng),
+      String(point.acc),
+      String(point.absoluteTimeMs),
+      String(point.relativeTimeMs),
+    ])
+  })
+
+  rows.push([])
+  rows.push(['theoreticalSteps', 'index', 'absoluteTimeMs', 'relativeTimeMs', 'matched'])
+
+  theoreticalStepsStore.forEach((step) => {
+    rows.push([
+      'theoreticalSteps',
+      String(step.index),
+      String(step.absoluteTimeMs),
+      String(step.relativeTimeMs),
+      String(step.matched),
+    ])
+  })
+
+  return rows
 }
 
 function downloadSessionData() {
-  const payload = buildSessionExport()
-  const json = JSON.stringify(payload, null, 2)
-  const blob = new Blob([json], { type: 'application/json' })
+  const rows = buildCsvRows()
+  const csv = rows
+    .map((row) => row.map((cell) => csvEscape(cell)).join(','))
+    .join('\n')
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   const safeDate = new Date().toISOString().replaceAll(':', '-')
   anchor.href = url
-  anchor.download = `embodied-x00-dpi-session-${safeDate}.json`
+  anchor.download = `embodied-xx0-beta-session-${safeDate}.csv`
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
@@ -663,9 +670,13 @@ function downloadSessionData() {
 }
 
 function sendSessionData() {
-  const payload = buildSessionExport()
-  const subject = encodeURIComponent(`${PROJECT_TITLE} — Session Data`)
-  const body = encodeURIComponent(JSON.stringify(payload, null, 2))
+  const rows = buildCsvRows()
+  const csv = rows
+    .map((row) => row.map((cell) => csvEscape(cell)).join(','))
+    .join('\n')
+
+  const subject = encodeURIComponent(`${PROJECT_TITLE} — Session Data CSV`)
+  const body = encodeURIComponent(csv)
   const mailto = `mailto:${RECIPIENT_EMAIL}?subject=${subject}&body=${body}`
 
   window.location.href = mailto
@@ -696,25 +707,63 @@ function deleteSessionData() {
   renderApp()
 }
 
-function formatCoordinate(value: number) {
-  return value.toFixed(6)
-}
-
-function renderSpatialTraceContent() {
-  if (gpsTrack.length === 0) {
-    return 'No GPS trace collected yet.'
+function renderSimpleTrackMap() {
+  if (gpsTrack.length < 2) {
+    return `
+      <div class="trace-summary">
+        <p>${gpsTrack.length === 1 ? 'Only one GPS point collected.' : 'No GPS trace collected yet.'}</p>
+      </div>
+    `
   }
 
-  const first = gpsTrack[0]
-  const last = gpsTrack[gpsTrack.length - 1]
+  const width = 320
+  const height = 220
+  const padding = 18
+
+  const lats = gpsTrack.map((p) => p.lat)
+  const lngs = gpsTrack.map((p) => p.lng)
+
+  const minLat = Math.min(...lats)
+  const maxLat = Math.max(...lats)
+  const minLng = Math.min(...lngs)
+  const maxLng = Math.max(...lngs)
+
+  const latRange = Math.max(maxLat - minLat, 0.00001)
+  const lngRange = Math.max(maxLng - minLng, 0.00001)
+
+  const points = gpsTrack.map((point) => {
+    const x = padding + ((point.lng - minLng) / lngRange) * (width - padding * 2)
+    const y = height - padding - ((point.lat - minLat) / latRange) * (height - padding * 2)
+    return { x, y }
+  })
+
+  const polyline = points.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')
+  const start = points[0]
+  const end = points[points.length - 1]
+
+  const firstGps = gpsTrack[0]
+  const lastGps = gpsTrack[gpsTrack.length - 1]
 
   return `
-    <div class="trace-summary">
-      <p><strong>Start:</strong> ${formatCoordinate(first.lat)}, ${formatCoordinate(first.lng)}</p>
-      <p><strong>End:</strong> ${formatCoordinate(last.lat)}, ${formatCoordinate(last.lng)}</p>
-      <p><strong>Points:</strong> ${gpsTrack.length}</p>
-      <p><strong>Latest accuracy:</strong> ${latestGps ? `${Math.round(latestGps.acc)} m` : 'n/a'}</p>
-      <p class="trace-note">Map integration can be added later using Leaflet or Mapbox.</p>
+    <div class="trace-map-wrapper">
+      <svg
+        class="trace-map"
+        viewBox="0 0 ${width} ${height}"
+        role="img"
+        aria-label="Spatial trace of GPS path"
+      >
+        <rect x="0" y="0" width="${width}" height="${height}" rx="16" ry="16"></rect>
+        <polyline points="${polyline}"></polyline>
+        <circle class="trace-start" cx="${start.x}" cy="${start.y}" r="5"></circle>
+        <circle class="trace-end" cx="${end.x}" cy="${end.y}" r="5"></circle>
+      </svg>
+
+      <div class="trace-summary">
+        <p><strong>Start:</strong> ${formatCoordinate(firstGps.lat)}, ${formatCoordinate(firstGps.lng)}</p>
+        <p><strong>End:</strong> ${formatCoordinate(lastGps.lat)}, ${formatCoordinate(lastGps.lng)}</p>
+        <p><strong>Points:</strong> ${gpsTrack.length}</p>
+        <p><strong>Distance:</strong> ${state.distanceMeters.toFixed(2)} m</p>
+      </div>
     </div>
   `
 }
@@ -728,7 +777,7 @@ function renderIntroPage() {
       </header>
 
       <div class="content">
-        <h1>Welcome to Embodied X00 DPI.</h1>
+        <h1>Welcome to Embodied XX0 beta.</h1>
         <p>We are about to join the pace of a scanning device.</p>
         <p>This interface provides a score to progressively tune our bodies to its operative rhythm of 883 m/h.</p>
 
@@ -991,7 +1040,7 @@ function renderResultsPage() {
         <section class="panel">
           <div class="eyebrow">Spatial trace</div>
           <div class="map-placeholder">
-            ${renderSpatialTraceContent()}
+            ${renderSimpleTrackMap()}
           </div>
         </section>
       </div>
