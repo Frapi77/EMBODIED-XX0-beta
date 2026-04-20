@@ -1,48 +1,744 @@
 import './style.css'
 
-type Page = 'intro' | 'setup' | 'calibration' | 'performance'
+type Page = 'intro' | 'setup' | 'calibration' | 'performance' | 'results' | 'close'
+
+const PROJECT_TITLE = 'EMBODIED X00 DPI'
+const RECIPIENT_EMAIL = 'mail.francescopi@gmail.com'
 
 const SCANNER_SPEED_M_PER_HOUR = 883
-const SCANNER_SPEED_M_PER_SEC = SCANNER_SPEED_M_PER_HOUR / 3600
+const SCANNER_SPEED_M_PER_SECOND = SCANNER_SPEED_M_PER_HOUR / 3600
 
-let currentPage: Page = 'intro'
+type RelativeTimeMs = number | ''
 
-let consentAccepted = false
-let stepLengthCm = ''
-let footLengthCm = ''
-let alternativeMovementParameters = ''
-let calculatedIntervalSec: number | null = null
+type TheoreticalStep = {
+  index: number
+  absoluteTimeMs: number
+  relativeTimeMs: number
+  matched: boolean
+}
+
+type GpsPoint = {
+  lat: number
+  lng: number
+  acc: number
+  absoluteTimeMs: number
+  relativeTimeMs: RelativeTimeMs
+}
+
+type SessionExport = {
+  project: string
+  exportedAtIso: string
+  consentAccepted: boolean
+  setup: {
+    stepLengthCm: string
+    footLengthCm: string
+    alternativeMovementParameters: string
+    calculatedIntervalSec: number | null
+    calculatedIntervalMs: number | null
+    sensitivity: number
+    peakThreshold: number
+    refractoryMs: number
+  }
+  results: {
+    elapsedTime: string
+    theoreticalSteps: number
+    detectedSteps: number
+    cumulativeDriftMs: number
+    currentMisalignmentMs: number
+    distanceMeters: number
+    gpsPoints: number
+  }
+  theoreticalStepsStore: TheoreticalStep[]
+  gpsTrack: GpsPoint[]
+  latestGps: GpsPoint | null
+}
+
+type AppState = {
+  page: Page
+  consentAccepted: boolean
+  stepLengthCm: string
+  footLengthCm: string
+  alternativeMovementParameters: string
+  calculatedIntervalSec: number | null
+  calculatedIntervalMs: number | null
+
+  motionEnabled: boolean
+  gpsEnabled: boolean
+  gpsDenied: boolean
+  calibrationRunning: boolean
+  sessionRunning: boolean
+
+  sensitivity: number
+  peakThreshold: number
+  refractoryMs: number
+  motionSource: string
+  motionSignal: number
+  calibrationDetectedSteps: number
+
+  elapsedTime: string
+  theoreticalSteps: number
+  detectedSteps: number
+  cumulativeDriftMs: number
+  currentMisalignmentMs: number
+  distanceMeters: number
+  gpsPoints: number
+}
+
+const state: AppState = {
+  page: 'intro',
+  consentAccepted: false,
+  stepLengthCm: '',
+  footLengthCm: '',
+  alternativeMovementParameters: '',
+  calculatedIntervalSec: null,
+  calculatedIntervalMs: null,
+
+  motionEnabled: false,
+  gpsEnabled: false,
+  gpsDenied: false,
+  calibrationRunning: false,
+  sessionRunning: false,
+
+  sensitivity: 6,
+  peakThreshold: 0.98,
+  refractoryMs: 783,
+  motionSource: 'none',
+  motionSignal: 0,
+  calibrationDetectedSteps: 0,
+
+  elapsedTime: '0.0 s',
+  theoreticalSteps: 0,
+  detectedSteps: 0,
+  cumulativeDriftMs: 0,
+  currentMisalignmentMs: 0,
+  distanceMeters: 0,
+  gpsPoints: 0,
+}
+
+let startTime: number | null = null
+let stopTime: number | null = null
+let liveTimer: number | null = null
+let theoreticalStepTimeout: number | null = null
+let audioContext: AudioContext | null = null
+
+let gpsWatchId: number | null = null
+let latestGps: GpsPoint | null = null
+
+let lastDetectedStepTime = 0
+let previousSignal = 0
+let smoothedSignal = 0
+let gravityBaseline = 9.81
+let theoreticalStepIndex = 0
+
+const theoreticalStepsStore: TheoreticalStep[] = []
+const gpsTrack: GpsPoint[] = []
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
+
+function mapSensitivity(value: number) {
+  const threshold = 1.8 - ((value - 1) / 9) * 1.45
+  const refractory = Math.round(1150 - ((value - 1) / 9) * 650)
+  return { threshold, refractory }
+}
+
+function applySensitivity(value: number) {
+  state.sensitivity = value
+  const mapped = mapSensitivity(value)
+  state.peakThreshold = mapped.threshold
+  state.refractoryMs = mapped.refractory
+}
+
+applySensitivity(state.sensitivity)
+
+function formatElapsed(ms: number) {
+  return `${(ms / 1000).toFixed(1)} s`
+}
+
+function getElapsedTimeMs() {
+  if (state.sessionRunning && startTime !== null) return Date.now() - startTime
+  if (!state.sessionRunning && startTime !== null && stopTime !== null) return stopTime - startTime
+  return 0
+}
+
+function resetSignalState() {
+  lastDetectedStepTime = 0
+  previousSignal = 0
+  smoothedSignal = 0
+  gravityBaseline = 9.81
+  state.motionSignal = 0
+  state.motionSource = 'none'
+}
+
+function resetCalibrationData() {
+  state.calibrationDetectedSteps = 0
+  resetSignalState()
+}
+
+function resetSessionData() {
+  startTime = null
+  stopTime = null
+  theoreticalStepIndex = 0
+
+  state.elapsedTime = '0.0 s'
+  state.theoreticalSteps = 0
+  state.detectedSteps = 0
+  state.currentMisalignmentMs = 0
+  state.cumulativeDriftMs = 0
+  state.distanceMeters = 0
+  state.gpsPoints = 0
+
+  latestGps = null
+  gpsTrack.length = 0
+  theoreticalStepsStore.length = 0
+
+  resetSignalState()
+}
+
+function clearSessionTimers() {
+  if (liveTimer !== null) {
+    window.clearInterval(liveTimer)
+    liveTimer = null
+  }
+  if (theoreticalStepTimeout !== null) {
+    window.clearTimeout(theoreticalStepTimeout)
+    theoreticalStepTimeout = null
+  }
+}
+
+function stopGpsWatch() {
+  if (gpsWatchId !== null && navigator.geolocation) {
+    navigator.geolocation.clearWatch(gpsWatchId)
+    gpsWatchId = null
+  }
+}
+
+function resetAllState() {
+  clearSessionTimers()
+  stopGpsWatch()
+
+  state.page = 'intro'
+  state.consentAccepted = false
+  state.stepLengthCm = ''
+  state.footLengthCm = ''
+  state.alternativeMovementParameters = ''
+  state.calculatedIntervalSec = null
+  state.calculatedIntervalMs = null
+
+  state.motionEnabled = false
+  state.gpsEnabled = false
+  state.gpsDenied = false
+  state.calibrationRunning = false
+  state.sessionRunning = false
+
+  applySensitivity(6)
+
+  resetCalibrationData()
+  resetSessionData()
+}
+
+function playBeep() {
+  if (!audioContext) return
+
+  const now = audioContext.currentTime
+  const oscillator1 = audioContext.createOscillator()
+  const oscillator2 = audioContext.createOscillator()
+  const gainNode = audioContext.createGain()
+
+  oscillator1.type = 'square'
+  oscillator1.frequency.setValueAtTime(1400, now)
+
+  oscillator2.type = 'triangle'
+  oscillator2.frequency.setValueAtTime(950, now)
+
+  gainNode.gain.setValueAtTime(0.0001, now)
+  gainNode.gain.exponentialRampToValueAtTime(0.45, now + 0.01)
+  gainNode.gain.exponentialRampToValueAtTime(0.22, now + 0.07)
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.2)
+
+  oscillator1.connect(gainNode)
+  oscillator2.connect(gainNode)
+  gainNode.connect(audioContext.destination)
+
+  oscillator1.start(now)
+  oscillator2.start(now)
+  oscillator1.stop(now + 0.2)
+  oscillator2.stop(now + 0.2)
+}
+
+function getMotionValue(event: DeviceMotionEvent) {
+  const acc = event.acceleration
+
+  if (acc && acc.x != null && acc.y != null && acc.z != null) {
+    state.motionSource = 'acceleration'
+    const x = acc.x ?? 0
+    const y = acc.y ?? 0
+    const z = acc.z ?? 0
+    return Math.sqrt(x * x + y * y + z * z)
+  }
+
+  const accG = event.accelerationIncludingGravity
+  if (accG && accG.x != null && accG.y != null && accG.z != null) {
+    state.motionSource = 'accelerationIncludingGravity'
+    const x = accG.x ?? 0
+    const y = accG.y ?? 0
+    const z = accG.z ?? 0
+    const magnitude = Math.sqrt(x * x + y * y + z * z)
+
+    gravityBaseline = 0.03 * magnitude + (1 - 0.03) * gravityBaseline
+
+    return Math.abs(magnitude - gravityBaseline)
+  }
+
+  state.motionSource = 'none'
+  return null
+}
+
+function findBestUnmatchedTheoreticalStep(now: number) {
+  let best: TheoreticalStep | null = null
+  let bestDistance = Number.POSITIVE_INFINITY
+
+  for (const step of theoreticalStepsStore) {
+    if (step.matched) continue
+
+    const distance = Math.abs(now - step.absoluteTimeMs)
+    if (distance < bestDistance) {
+      best = step
+      bestDistance = distance
+    }
+  }
+
+  return best
+}
+
+function registerDetectedStep(now: number) {
+  state.detectedSteps += 1
+
+  const best = findBestUnmatchedTheoreticalStep(now)
+  if (best) {
+    best.matched = true
+    const misalignment = now - best.absoluteTimeMs
+    state.currentMisalignmentMs = misalignment
+    state.cumulativeDriftMs += misalignment
+  }
+
+  renderApp()
+}
+
+function handleMotionEvent(event: DeviceMotionEvent) {
+  const rawValue = getMotionValue(event)
+  if (rawValue == null) return
+
+  smoothedSignal = 0.35 * rawValue + (1 - 0.35) * smoothedSignal
+  state.motionSignal = smoothedSignal
+
+  const now = Date.now()
+  const enoughTimePassed = now - lastDetectedStepTime > state.refractoryMs
+  const crossedUp = previousSignal <= state.peakThreshold && state.motionSignal > state.peakThreshold
+
+  if (state.calibrationRunning && crossedUp && enoughTimePassed) {
+    lastDetectedStepTime = now
+    state.calibrationDetectedSteps += 1
+    renderApp()
+  }
+
+  if (state.sessionRunning && crossedUp && enoughTimePassed) {
+    lastDetectedStepTime = now
+    registerDetectedStep(now)
+  }
+
+  previousSignal = state.motionSignal
+}
+
+async function enableMotion() {
+  try {
+    const MotionEventWithPermission = DeviceMotionEvent as typeof DeviceMotionEvent & {
+      requestPermission?: () => Promise<'granted' | 'denied'>
+    }
+
+    if (
+      typeof MotionEventWithPermission !== 'undefined' &&
+      typeof MotionEventWithPermission.requestPermission === 'function'
+    ) {
+      const permission = await MotionEventWithPermission.requestPermission()
+      if (permission !== 'granted') {
+        alert('Motion permission denied.')
+        return
+      }
+    }
+
+    window.removeEventListener('devicemotion', handleMotionEvent)
+    window.addEventListener('devicemotion', handleMotionEvent)
+
+    state.motionEnabled = true
+    renderApp()
+  } catch (error) {
+    console.error(error)
+    alert('Unable to enable motion on this device/browser.')
+  }
+}
+
+function haversineDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const toRad = (deg: number) => (deg * Math.PI) / 180
+  const R = 6371000
+
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2)
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return R * c
+}
+
+function buildGpsPoint(position: GeolocationPosition): GpsPoint {
+  return {
+    lat: position.coords.latitude,
+    lng: position.coords.longitude,
+    acc: position.coords.accuracy,
+    absoluteTimeMs: position.timestamp,
+    relativeTimeMs: startTime !== null ? position.timestamp - startTime : '',
+  }
+}
+
+function shouldUseGpsPoint(point: GpsPoint) {
+  return Number.isFinite(point.acc) && point.acc > 0 && point.acc <= 100
+}
+
+function addGpsPoint(position: GeolocationPosition) {
+  const point = buildGpsPoint(position)
+  latestGps = point
+
+  if (!shouldUseGpsPoint(point)) {
+    renderApp()
+    return
+  }
+
+  if (gpsTrack.length === 0) {
+    gpsTrack.push(point)
+    state.gpsPoints = gpsTrack.length
+    renderApp()
+    return
+  }
+
+  const prev = gpsTrack[gpsTrack.length - 1]
+  const segmentDistance = haversineDistanceMeters(prev.lat, prev.lng, point.lat, point.lng)
+
+  const timeDiffSec =
+    point.absoluteTimeMs > prev.absoluteTimeMs
+      ? (point.absoluteTimeMs - prev.absoluteTimeMs) / 1000
+      : 0
+
+  const plausibleSpeedMps =
+    timeDiffSec > 0 ? segmentDistance / timeDiffSec : Number.POSITIVE_INFINITY
+
+  if (plausibleSpeedMps <= 3.5) {
+    state.distanceMeters += segmentDistance
+    gpsTrack.push(point)
+    state.gpsPoints = gpsTrack.length
+  }
+
+  renderApp()
+}
+
+function enableGps() {
+  if (!navigator.geolocation) {
+    alert('Geolocation is not supported on this device/browser.')
+    return
+  }
+
+  state.gpsDenied = false
+
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      const point = buildGpsPoint(position)
+      latestGps = point
+      state.gpsEnabled = true
+
+      if (shouldUseGpsPoint(point) && gpsTrack.length === 0) {
+        gpsTrack.push(point)
+        state.gpsPoints = gpsTrack.length
+      }
+
+      renderApp()
+    },
+    (error) => {
+      console.error(error)
+      state.gpsEnabled = false
+      state.gpsDenied = true
+      renderApp()
+      alert('GPS denied or unavailable.')
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 10000,
+    },
+  )
+}
+
+function startGpsWatch() {
+  if (!state.gpsEnabled || !navigator.geolocation) return
+
+  stopGpsWatch()
+
+  gpsWatchId = navigator.geolocation.watchPosition(
+    (position) => {
+      addGpsPoint(position)
+    },
+    (error) => {
+      console.error(error)
+      state.gpsEnabled = false
+      state.gpsDenied = true
+      stopGpsWatch()
+      renderApp()
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 10000,
+    },
+  )
+}
+
+function startCalibration() {
+  if (!state.motionEnabled || state.sessionRunning) return
+  state.calibrationRunning = true
+  resetCalibrationData()
+  renderApp()
+}
+
+function resetCalibration() {
+  state.calibrationRunning = false
+  resetCalibrationData()
+  renderApp()
+}
+
+function pushTheoreticalStep(tsAbsolute: number) {
+  state.theoreticalSteps += 1
+
+  theoreticalStepsStore.push({
+    index: state.theoreticalSteps,
+    absoluteTimeMs: tsAbsolute,
+    relativeTimeMs: startTime !== null ? tsAbsolute - startTime : 0,
+    matched: false,
+  })
+
+  renderApp()
+}
+
+function scheduleNextTheoreticalStep() {
+  if (!state.sessionRunning || startTime === null || state.calculatedIntervalMs === null) return
+
+  const interval = state.calculatedIntervalMs
+  const targetTime = startTime + theoreticalStepIndex * interval
+  const delay = Math.max(0, targetTime - Date.now())
+
+  theoreticalStepTimeout = window.setTimeout(() => {
+    if (!state.sessionRunning || startTime === null) return
+
+    pushTheoreticalStep(targetTime)
+    playBeep()
+
+    theoreticalStepIndex += 1
+    scheduleNextTheoreticalStep()
+  }, delay)
+}
+
+async function ensureAudioContext() {
+  if (!audioContext) {
+    const AudioCtor =
+      window.AudioContext ||
+      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+
+    if (AudioCtor) {
+      audioContext = new AudioCtor()
+    }
+  }
+
+  if (audioContext?.state === 'suspended') {
+    await audioContext.resume()
+  }
+}
+
+async function startSession() {
+  if (!state.calculatedIntervalMs || !state.motionEnabled || state.sessionRunning) return
+
+  state.calibrationRunning = false
+  clearSessionTimers()
+  resetSessionData()
+
+  state.sessionRunning = true
+  startTime = Date.now()
+  stopTime = null
+  theoreticalStepIndex = 0
+
+  await ensureAudioContext()
+
+  scheduleNextTheoreticalStep()
+
+  liveTimer = window.setInterval(() => {
+    state.elapsedTime = formatElapsed(getElapsedTimeMs())
+    renderApp()
+  }, 100)
+
+  startGpsWatch()
+  renderApp()
+}
+
+function stopSession() {
+  if (!state.sessionRunning) return
+
+  state.sessionRunning = false
+  stopTime = Date.now()
+
+  clearSessionTimers()
+  stopGpsWatch()
+
+  state.elapsedTime = formatElapsed(getElapsedTimeMs())
+  state.page = 'results'
+  renderApp()
+}
+
+function confirmLeaveDuringSession() {
+  if (!state.sessionRunning) return true
+  alert('Please end the current session before leaving this page.')
+  return false
+}
+
+function buildSessionExport(): SessionExport {
+  return {
+    project: PROJECT_TITLE,
+    exportedAtIso: new Date().toISOString(),
+    consentAccepted: state.consentAccepted,
+    setup: {
+      stepLengthCm: state.stepLengthCm,
+      footLengthCm: state.footLengthCm,
+      alternativeMovementParameters: state.alternativeMovementParameters,
+      calculatedIntervalSec: state.calculatedIntervalSec,
+      calculatedIntervalMs: state.calculatedIntervalMs,
+      sensitivity: state.sensitivity,
+      peakThreshold: state.peakThreshold,
+      refractoryMs: state.refractoryMs,
+    },
+    results: {
+      elapsedTime: state.elapsedTime,
+      theoreticalSteps: state.theoreticalSteps,
+      detectedSteps: state.detectedSteps,
+      cumulativeDriftMs: state.cumulativeDriftMs,
+      currentMisalignmentMs: state.currentMisalignmentMs,
+      distanceMeters: state.distanceMeters,
+      gpsPoints: state.gpsPoints,
+    },
+    theoreticalStepsStore: [...theoreticalStepsStore],
+    gpsTrack: [...gpsTrack],
+    latestGps,
+  }
+}
+
+function downloadSessionData() {
+  const payload = buildSessionExport()
+  const json = JSON.stringify(payload, null, 2)
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  const safeDate = new Date().toISOString().replaceAll(':', '-')
+  anchor.href = url
+  anchor.download = `embodied-x00-dpi-session-${safeDate}.json`
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
+function sendSessionData() {
+  const payload = buildSessionExport()
+  const subject = encodeURIComponent(`${PROJECT_TITLE} — Session Data`)
+  const body = encodeURIComponent(JSON.stringify(payload, null, 2))
+  const mailto = `mailto:${RECIPIENT_EMAIL}?subject=${subject}&body=${body}`
+
+  window.location.href = mailto
+}
+
+function deleteSessionData() {
+  const confirmed = window.confirm('Delete all current session data?')
+  if (!confirmed) return
+
+  state.page = 'intro'
+  state.consentAccepted = false
+  state.stepLengthCm = ''
+  state.footLengthCm = ''
+  state.alternativeMovementParameters = ''
+  state.calculatedIntervalSec = null
+  state.calculatedIntervalMs = null
+  state.calibrationRunning = false
+  state.sessionRunning = false
+  state.gpsEnabled = false
+  state.gpsDenied = false
+  state.motionEnabled = false
+
+  clearSessionTimers()
+  stopGpsWatch()
+  resetCalibrationData()
+  resetSessionData()
+
+  renderApp()
+}
+
+function formatCoordinate(value: number) {
+  return value.toFixed(6)
+}
+
+function renderSpatialTraceContent() {
+  if (gpsTrack.length === 0) {
+    return 'No GPS trace collected yet.'
+  }
+
+  const first = gpsTrack[0]
+  const last = gpsTrack[gpsTrack.length - 1]
+
+  return `
+    <div class="trace-summary">
+      <p><strong>Start:</strong> ${formatCoordinate(first.lat)}, ${formatCoordinate(first.lng)}</p>
+      <p><strong>End:</strong> ${formatCoordinate(last.lat)}, ${formatCoordinate(last.lng)}</p>
+      <p><strong>Points:</strong> ${gpsTrack.length}</p>
+      <p><strong>Latest accuracy:</strong> ${latestGps ? `${Math.round(latestGps.acc)} m` : 'n/a'}</p>
+      <p class="trace-note">Map integration can be added later using Leaflet or Mapbox.</p>
+    </div>
+  `
+}
 
 function renderIntroPage() {
   return `
     <section class="screen">
       <header class="topbar">
-        <div class="project-tag">EMBODIED X00 DPI</div>
-        <button class="lang-switch" type="button">IT</button>
+        <div class="project-tag">${PROJECT_TITLE}</div>
+        <button class="lang-switch" type="button" disabled>IT</button>
       </header>
 
       <div class="content">
         <h1>Welcome to Embodied X00 DPI.</h1>
         <p>We are about to join the pace of a scanning device.</p>
-        <p>
-          This interface provides a score to progressively tune our bodies to its
-          operative rhythm of 883 m/h.
-        </p>
+        <p>This interface provides a score to progressively tune our bodies to its operative rhythm of 883 m/h.</p>
 
-        <section class="box">
+        <section class="panel">
           <h2>Data processing consent</h2>
-          <p>
-            During the walk, this interface may collect step timing data, motion
-            sensor data, and GPS location data.
-          </p>
-          <p>
-            If you choose to submit the session data at the end, these data may be
-            stored, processed, and used for artistic research, documentation, and
-            dissemination purposes.
-          </p>
+          <p>During the walk, this interface may collect step timing data, motion sensor data, and GPS location data.</p>
+          <p>If you choose to submit the session data at the end, these data may be stored, processed, and used for artistic research, documentation, and dissemination purposes.</p>
 
           <label class="checkbox-row">
-            <input id="consent-checkbox" type="checkbox" ${consentAccepted ? 'checked' : ''} />
+            <input id="consent-checkbox" type="checkbox" ${state.consentAccepted ? 'checked' : ''} />
             <span>I have read and understood the information and agree to proceed.</span>
           </label>
         </section>
@@ -56,76 +752,69 @@ function renderIntroPage() {
 }
 
 function renderSetupPage() {
-  const resultSection =
-    calculatedIntervalSec !== null
+  const resultMarkup =
+    state.calculatedIntervalSec !== null
       ? `
-        <section class="box result-box">
-          <div class="result-label">Calculated rhythm</div>
-          <div class="result-value">Your movement interval is ${calculatedIntervalSec.toFixed(2)} s</div>
-          <p class="result-text">
-            This value estimates the interval through which movement can tune to the scanner’s operative rhythm.
-          </p>
+        <section class="panel">
+          <div class="eyebrow">Calculated rhythm</div>
+          <div class="result-value">Your movement interval is ${state.calculatedIntervalSec.toFixed(2)} s</div>
+          <p>Sensitivity: <strong>${state.sensitivity}</strong></p>
+          <p>Threshold: <strong>${state.peakThreshold.toFixed(2)}</strong></p>
+          <p>Refractory window: <strong>${state.refractoryMs} ms</strong></p>
         </section>
-      `
-      : ''
-
-  const continueButton =
-    calculatedIntervalSec !== null
-      ? `
-        <button id="continue-button" class="secondary-button" type="button">
-          Continue to calibration
-        </button>
       `
       : ''
 
   return `
     <section class="screen">
       <header class="topbar">
-        <button id="back-button" class="ghost-button" type="button">Back</button>
+        <button id="back-to-intro" class="ghost-button" type="button">Back</button>
         <div class="project-tag">PAGE 2 / BODY SETUP</div>
       </header>
 
       <div class="content">
         <h1>Body setup</h1>
         <p>Before entering the score, we need to calibrate a few bodily metrics.</p>
-        <p>
-          These values will be used to estimate movement interval and tune our pace
-          to the scanner’s operative rhythm.
-        </p>
+        <p>These values will be used to estimate movement interval and tune our pace to the scanner’s operative rhythm.</p>
 
-        <section class="box">
+        <section class="panel">
           <label class="field">
             <span>Step length (cm)</span>
-            <input id="step-length-input" type="number" step="0.1" value="${stepLengthCm}" placeholder="e.g. 72" />
+            <input id="step-length-input" type="number" inputmode="decimal" step="0.1" placeholder="e.g. 72" value="${escapeHtml(state.stepLengthCm)}" />
           </label>
 
           <label class="field">
             <span>Foot length (optional)</span>
-            <input id="foot-length-input" type="number" step="0.1" value="${footLengthCm}" placeholder="e.g. 28" />
+            <input id="foot-length-input" type="number" inputmode="decimal" step="0.1" placeholder="e.g. 28" value="${escapeHtml(state.footLengthCm)}" />
           </label>
 
           <label class="field">
             <span>Alternative movement parameters (optional)</span>
-            <textarea id="alternative-movement-input" rows="4" placeholder="Jumping, longer stride, jaguar pace...">${alternativeMovementParameters}</textarea>
+            <textarea id="alternative-input" rows="4" placeholder="Jumping, longer stride, jaguar pace...">${escapeHtml(state.alternativeMovementParameters)}</textarea>
           </label>
         </section>
 
-        ${resultSection}
+        ${resultMarkup}
       </div>
 
-      <footer class="footer-actions two-actions">
+      <footer class="footer-actions stacked-actions">
         <button id="calculate-button" class="primary-button" type="button">Calculate</button>
-        ${continueButton}
+        <button id="to-calibration-button" class="secondary-button" type="button" ${state.calculatedIntervalSec === null ? 'disabled' : ''}>
+          Continue to calibration
+        </button>
       </footer>
     </section>
   `
 }
 
 function renderCalibrationPage() {
+  const gpsText = state.gpsDenied ? 'Denied' : state.gpsEnabled ? 'Enabled' : 'Not enabled'
+  const calibrationText = state.calibrationRunning ? 'On' : 'Off'
+
   return `
     <section class="screen">
       <header class="topbar">
-        <button id="back-to-setup-button" class="ghost-button" type="button">Back</button>
+        <button id="back-to-setup" class="ghost-button" type="button">Back</button>
         <div class="project-tag">PAGE 3 / CALIBRATION</div>
       </header>
 
@@ -134,43 +823,69 @@ function renderCalibrationPage() {
         <p>This phase establishes the reliability of this specific entanglement.</p>
         <p>Let’s check if our bodies can attune to one another, and if our walk can be spatially traced.</p>
 
-        <section class="box">
-          <div class="status-row">
-            <span>Cue active</span>
-            <span class="status-pill">Ready</span>
-          </div>
-
-          <div class="status-row">
-            <span>Motion detected</span>
-            <span class="status-pill inactive">Waiting</span>
-          </div>
-
+        <section class="panel">
           <label class="field">
-            <span>Sensitivity</span>
-            <input type="range" min="1" max="10" value="5" />
+            <span>Detection sensitivity</span>
+            <input id="sensitivity-slider" type="range" min="1" max="10" step="1" value="${state.sensitivity}" />
           </label>
 
+          <div class="mini-info">
+            Sensitivity: <strong>${state.sensitivity}</strong><br>
+            Lower = stricter, higher = more reactive<br>
+            Threshold: <strong>${state.peakThreshold.toFixed(2)}</strong><br>
+            Refractory window: <strong>${state.refractoryMs} ms</strong>
+          </div>
+        </section>
+
+        <section class="panel">
           <div class="status-row">
-            <span>Enable location access</span>
-            <button class="small-button" type="button">Enable</button>
+            <span>Motion</span>
+            <span class="status-pill ${state.motionEnabled ? '' : 'muted'}">${state.motionEnabled ? 'Enabled' : 'Not enabled'}</span>
           </div>
 
           <div class="status-row">
-            <span>Waiting for GPS signal</span>
-            <span class="status-pill inactive">Pending</span>
+            <span>GPS</span>
+            <span class="status-pill ${state.gpsEnabled ? '' : 'muted'}">${gpsText}</span>
           </div>
 
           <div class="status-row">
-            <span>Map ready</span>
-            <span class="status-pill inactive">No</span>
+            <span>Calibration</span>
+            <span class="status-pill ${state.calibrationRunning ? '' : 'muted'}">${calibrationText}</span>
           </div>
 
-          <button class="secondary-button" type="button">Test movement</button>
+          <div class="status-row">
+            <span>Calibration detected steps</span>
+            <span class="status-pill">${state.calibrationDetectedSteps}</span>
+          </div>
+
+          <div class="status-row">
+            <span>Motion source</span>
+            <span class="status-pill muted">${state.motionSource}</span>
+          </div>
+
+          <div class="status-row">
+            <span>Motion signal</span>
+            <span class="status-pill muted">${state.motionSignal.toFixed(3)}</span>
+          </div>
+
+          <div class="status-row">
+            <span>GPS points</span>
+            <span class="status-pill muted">${state.gpsPoints}</span>
+          </div>
+        </section>
+
+        <section class="panel action-list">
+          <button id="enable-motion-button" class="secondary-button" type="button">Enable motion</button>
+          <button id="enable-gps-button" class="secondary-button" type="button">Enable GPS</button>
+          <button id="start-calibration-button" class="secondary-button" type="button">Start calibration</button>
+          <button id="reset-calibration-button" class="secondary-button" type="button">Reset calibration</button>
         </section>
       </div>
 
       <footer class="footer-actions">
-        <button id="confirm-calibration-button" class="primary-button" type="button">Confirm calibration</button>
+        <button id="to-performance-button" class="primary-button" type="button" ${!state.motionEnabled || state.calculatedIntervalSec === null ? 'disabled' : ''}>
+          Confirm calibration
+        </button>
       </footer>
     </section>
   `
@@ -180,7 +895,7 @@ function renderPerformancePage() {
   return `
     <section class="screen">
       <header class="topbar">
-        <button id="back-to-calibration-button" class="ghost-button" type="button">Back</button>
+        <button id="back-to-calibration" class="ghost-button" type="button">Back</button>
         <div class="project-tag">PAGE 4 / PERFORMANCE</div>
       </header>
 
@@ -192,52 +907,148 @@ function renderPerformancePage() {
         <p>Enjoy the experience as it takes place.</p>
         <p>When you have had enough, take 10 more steps before stopping.</p>
 
-        <section class="box">
+        <section class="metrics-grid">
           <div class="metric-card">
             <span class="metric-label">Elapsed time</span>
-            <span class="metric-value">00:00</span>
+            <span class="metric-value">${state.elapsedTime}</span>
           </div>
 
           <div class="metric-card">
             <span class="metric-label">Theoretical steps</span>
-            <span class="metric-value">0</span>
+            <span class="metric-value">${state.theoreticalSteps}</span>
           </div>
 
           <div class="metric-card">
             <span class="metric-label">Detected steps</span>
-            <span class="metric-value">0</span>
+            <span class="metric-value">${state.detectedSteps}</span>
+          </div>
+
+          <div class="metric-card">
+            <span class="metric-label">Current misalignment</span>
+            <span class="metric-value">${Math.round(state.currentMisalignmentMs)} ms</span>
           </div>
 
           <div class="metric-card">
             <span class="metric-label">Cumulative drift</span>
-            <span class="metric-value">0</span>
+            <span class="metric-value">${Math.round(state.cumulativeDriftMs)} ms</span>
           </div>
 
-          <div class="metric-card">
+          <div class="metric-card full-width">
             <span class="metric-label">Distance</span>
-            <span class="metric-value">0 m</span>
+            <span class="metric-value">${state.distanceMeters.toFixed(2)} m</span>
           </div>
         </section>
       </div>
 
-      <footer class="footer-actions two-actions">
-        <button id="performance-start-button" class="primary-button" type="button">Start</button>
-        <button id="end-session-button" class="secondary-button danger-button" type="button">End session</button>
+      <footer class="footer-actions stacked-actions">
+        <button id="start-performance-button" class="primary-button" type="button" ${state.sessionRunning ? 'disabled' : ''}>Start</button>
+        <button id="end-session-button" class="secondary-button danger-button" type="button" ${!state.sessionRunning ? 'disabled' : ''}>End session</button>
+      </footer>
+    </section>
+  `
+}
+
+function renderResultsPage() {
+  return `
+    <section class="screen">
+      <header class="topbar">
+        <button id="back-to-performance" class="ghost-button" type="button">Back</button>
+        <div class="project-tag">PAGE 5 / RESULTS</div>
+      </header>
+
+      <div class="content">
+        <h1>Results</h1>
+        <p>The session has ended.</p>
+        <p>This page gathers the temporal and spatial traces produced during the walk.</p>
+
+        <section class="metrics-grid">
+          <div class="metric-card">
+            <span class="metric-label">Total duration</span>
+            <span class="metric-value">${state.elapsedTime}</span>
+          </div>
+
+          <div class="metric-card">
+            <span class="metric-label">Total theoretical steps</span>
+            <span class="metric-value">${state.theoreticalSteps}</span>
+          </div>
+
+          <div class="metric-card">
+            <span class="metric-label">Total detected steps</span>
+            <span class="metric-value">${state.detectedSteps}</span>
+          </div>
+
+          <div class="metric-card">
+            <span class="metric-label">GPS points</span>
+            <span class="metric-value">${state.gpsPoints}</span>
+          </div>
+
+          <div class="metric-card full-width">
+            <span class="metric-label">Final distance</span>
+            <span class="metric-value">${state.distanceMeters.toFixed(2)} m</span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="eyebrow">Spatial trace</div>
+          <div class="map-placeholder">
+            ${renderSpatialTraceContent()}
+          </div>
+        </section>
+      </div>
+
+      <footer class="footer-actions">
+        <button id="to-close-button" class="primary-button" type="button">Continue</button>
+      </footer>
+    </section>
+  `
+}
+
+function renderClosePage() {
+  return `
+    <section class="screen">
+      <header class="topbar">
+        <button id="back-to-results" class="ghost-button" type="button">Back</button>
+        <div class="project-tag">PAGE 6 / CLOSE</div>
+      </header>
+
+      <div class="content">
+        <h1>Session complete</h1>
+        <p>You may now choose what to do with the traces produced during the walk.</p>
+
+        <section class="panel action-list">
+          <button id="send-data-button" class="secondary-button" type="button">Send data</button>
+          <button id="download-data-button" class="secondary-button" type="button">Download data</button>
+          <button id="delete-data-button" class="secondary-button danger-button" type="button">Delete session data</button>
+        </section>
+
+        <section class="panel">
+          <div class="eyebrow">Recipient</div>
+          <p>${RECIPIENT_EMAIL}</p>
+        </section>
+      </div>
+
+      <footer class="footer-actions">
+        <button id="finish-button" class="primary-button" type="button">Finish</button>
       </footer>
     </section>
   `
 }
 
 function getMarkup() {
-  if (currentPage === 'intro') return renderIntroPage()
-  if (currentPage === 'setup') return renderSetupPage()
-  if (currentPage === 'calibration') return renderCalibrationPage()
-  return renderPerformancePage()
-}
-
-function calculateInterval(stepCm: number) {
-  const stepMeters = stepCm / 100
-  return stepMeters / SCANNER_SPEED_M_PER_SEC
+  switch (state.page) {
+    case 'intro':
+      return renderIntroPage()
+    case 'setup':
+      return renderSetupPage()
+    case 'calibration':
+      return renderCalibrationPage()
+    case 'performance':
+      return renderPerformancePage()
+    case 'results':
+      return renderResultsPage()
+    case 'close':
+      return renderClosePage()
+  }
 }
 
 function renderApp() {
@@ -245,7 +1056,7 @@ function renderApp() {
   if (!app) return
 
   app.innerHTML = `
-    <main class="app">
+    <main class="app-shell">
       ${getMarkup()}
     </main>
   `
@@ -254,86 +1065,132 @@ function renderApp() {
 }
 
 function bindEvents() {
-  const consentCheckbox = document.querySelector<HTMLInputElement>('#consent-checkbox')
-  const startButton = document.querySelector<HTMLButtonElement>('#start-button')
-
-  const backButton = document.querySelector<HTMLButtonElement>('#back-button')
-  const calculateButton = document.querySelector<HTMLButtonElement>('#calculate-button')
-  const continueButton = document.querySelector<HTMLButtonElement>('#continue-button')
-
-  const backToSetupButton = document.querySelector<HTMLButtonElement>('#back-to-setup-button')
-  const confirmCalibrationButton = document.querySelector<HTMLButtonElement>('#confirm-calibration-button')
-
-  const backToCalibrationButton = document.querySelector<HTMLButtonElement>('#back-to-calibration-button')
-  const performanceStartButton = document.querySelector<HTMLButtonElement>('#performance-start-button')
-  const endSessionButton = document.querySelector<HTMLButtonElement>('#end-session-button')
-
-  consentCheckbox?.addEventListener('change', () => {
-    consentAccepted = consentCheckbox.checked
+  document.querySelector<HTMLInputElement>('#consent-checkbox')?.addEventListener('change', (event) => {
+    const target = event.currentTarget as HTMLInputElement
+    state.consentAccepted = target.checked
   })
 
-  startButton?.addEventListener('click', () => {
-    if (!consentCheckbox?.checked) {
+  document.querySelector<HTMLButtonElement>('#start-button')?.addEventListener('click', () => {
+    if (!state.consentAccepted) {
       alert('Please accept the data processing consent before continuing.')
       return
     }
-
-    consentAccepted = true
-    currentPage = 'setup'
+    state.page = 'setup'
     renderApp()
   })
 
-  backButton?.addEventListener('click', () => {
-    currentPage = 'intro'
+  document.querySelector<HTMLButtonElement>('#back-to-intro')?.addEventListener('click', () => {
+    state.page = 'intro'
     renderApp()
   })
 
-  calculateButton?.addEventListener('click', () => {
+  document.querySelector<HTMLButtonElement>('#calculate-button')?.addEventListener('click', () => {
     const stepInput = document.querySelector<HTMLInputElement>('#step-length-input')
     const footInput = document.querySelector<HTMLInputElement>('#foot-length-input')
-    const altInput = document.querySelector<HTMLTextAreaElement>('#alternative-movement-input')
+    const altInput = document.querySelector<HTMLTextAreaElement>('#alternative-input')
 
-    stepLengthCm = stepInput?.value ?? ''
-    footLengthCm = footInput?.value ?? ''
-    alternativeMovementParameters = altInput?.value ?? ''
+    state.stepLengthCm = stepInput?.value ?? ''
+    state.footLengthCm = footInput?.value ?? ''
+    state.alternativeMovementParameters = altInput?.value ?? ''
 
-    const numericStep = Number(stepLengthCm)
+    const numericStep = Number(state.stepLengthCm)
 
-    if (!stepLengthCm || Number.isNaN(numericStep) || numericStep <= 0) {
+    if (!state.stepLengthCm || Number.isNaN(numericStep) || numericStep <= 0) {
       alert('Please enter a valid step length in centimeters.')
       return
     }
 
-    calculatedIntervalSec = calculateInterval(numericStep)
+    const stepLengthM = numericStep / 100
+    state.calculatedIntervalSec = stepLengthM / SCANNER_SPEED_M_PER_SECOND
+    state.calculatedIntervalMs = state.calculatedIntervalSec * 1000
+
     renderApp()
   })
 
-  continueButton?.addEventListener('click', () => {
-    currentPage = 'calibration'
+  document.querySelector<HTMLButtonElement>('#to-calibration-button')?.addEventListener('click', () => {
+    if (state.calculatedIntervalSec === null) return
+    state.page = 'calibration'
     renderApp()
   })
 
-  backToSetupButton?.addEventListener('click', () => {
-    currentPage = 'setup'
+  document.querySelector<HTMLButtonElement>('#back-to-setup')?.addEventListener('click', () => {
+    if (!confirmLeaveDuringSession()) return
+    state.page = 'setup'
     renderApp()
   })
 
-  confirmCalibrationButton?.addEventListener('click', () => {
-    currentPage = 'performance'
+  document.querySelector<HTMLInputElement>('#sensitivity-slider')?.addEventListener('input', (event) => {
+    const target = event.currentTarget as HTMLInputElement
+    applySensitivity(Number(target.value))
     renderApp()
   })
 
-  backToCalibrationButton?.addEventListener('click', () => {
-    currentPage = 'calibration'
+  document.querySelector<HTMLButtonElement>('#enable-motion-button')?.addEventListener('click', async () => {
+    await enableMotion()
+  })
+
+  document.querySelector<HTMLButtonElement>('#enable-gps-button')?.addEventListener('click', () => {
+    enableGps()
+  })
+
+  document.querySelector<HTMLButtonElement>('#start-calibration-button')?.addEventListener('click', () => {
+    startCalibration()
+  })
+
+  document.querySelector<HTMLButtonElement>('#reset-calibration-button')?.addEventListener('click', () => {
+    resetCalibration()
+  })
+
+  document.querySelector<HTMLButtonElement>('#to-performance-button')?.addEventListener('click', () => {
+    if (!state.motionEnabled || state.calculatedIntervalSec === null) return
+    state.page = 'performance'
     renderApp()
   })
 
-  performanceStartButton?.addEventListener('click', () => {
-    alert('Performance started.')
+  document.querySelector<HTMLButtonElement>('#back-to-calibration')?.addEventListener('click', () => {
+    if (!confirmLeaveDuringSession()) return
+    state.page = 'calibration'
+    renderApp()
   })
 
-  endSessionButton?.addEventListener('click', () => {
-    alert('Session ended.')
+  document.querySelector<HTMLButtonElement>('#start-performance-button')?.addEventListener('click', async () => {
+    await startSession()
+  })
+
+  document.querySelector<HTMLButtonElement>('#end-session-button')?.addEventListener('click', () => {
+    stopSession()
+  })
+
+  document.querySelector<HTMLButtonElement>('#back-to-performance')?.addEventListener('click', () => {
+    state.page = 'performance'
+    renderApp()
+  })
+
+  document.querySelector<HTMLButtonElement>('#to-close-button')?.addEventListener('click', () => {
+    state.page = 'close'
+    renderApp()
+  })
+
+  document.querySelector<HTMLButtonElement>('#back-to-results')?.addEventListener('click', () => {
+    state.page = 'results'
+    renderApp()
+  })
+
+  document.querySelector<HTMLButtonElement>('#send-data-button')?.addEventListener('click', () => {
+    sendSessionData()
+  })
+
+  document.querySelector<HTMLButtonElement>('#download-data-button')?.addEventListener('click', () => {
+    downloadSessionData()
+  })
+
+  document.querySelector<HTMLButtonElement>('#delete-data-button')?.addEventListener('click', () => {
+    deleteSessionData()
+  })
+
+  document.querySelector<HTMLButtonElement>('#finish-button')?.addEventListener('click', () => {
+    resetAllState()
+    renderApp()
   })
 }
 
